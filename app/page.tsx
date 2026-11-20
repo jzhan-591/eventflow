@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { parseParticipantCsv } from "./participant-csv";
 
 const initialParticipants = [
   { id: 1, name: "Avery Morgan" },
@@ -11,11 +12,17 @@ const initialParticipants = [
 ];
 
 export default function Dashboard() {
-  const [participants, setParticipants] = useState(initialParticipants);
-  const [checkedInIds, setCheckedInIds] = useState<number[]>([]);
+  const [{ participants, checkedInIds, importMessage }, setRoster] = useState({
+    participants: initialParticipants,
+    checkedInIds: [] as number[],
+    importMessage: "",
+  });
   const [participantName, setParticipantName] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [nameError, setNameError] = useState("");
+  const [exportMessage, setExportMessage] = useState("");
+  const [isImporting, setIsImporting] = useState(false);
+  const csvInput = useRef<HTMLInputElement>(null);
 
   const checkedInCount = checkedInIds.length;
   const total = participants.length;
@@ -42,19 +49,105 @@ export default function Dashboard() {
       return;
     }
 
-    setParticipants((currentParticipants) => [
-      ...currentParticipants,
-      { id: currentParticipants.length + 1, name },
-    ]);
+    setRoster((current) => ({
+      ...current,
+      participants: [
+        ...current.participants,
+        { id: current.participants.length + 1, name },
+      ],
+    }));
     setParticipantName("");
     setNameError("");
     setSearchQuery("");
   }
 
   function checkIn(id: number) {
-    setCheckedInIds((currentIds) =>
-      currentIds.includes(id) ? currentIds : [...currentIds, id],
+    setRoster((current) =>
+      current.checkedInIds.includes(id)
+        ? current
+        : { ...current, checkedInIds: [...current.checkedInIds, id] },
     );
+  }
+
+  async function importParticipantsCsv(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      setRoster((current) => ({ ...current, importMessage: "Choose a .csv file to import." }));
+      return;
+    }
+
+    setIsImporting(true);
+    try {
+      const text = await file.text().catch(() => {
+        throw new Error("The file could not be read. Select the CSV file and try again.");
+      });
+      const importedParticipants = parseParticipantCsv(text);
+
+      setRoster((current) => {
+        const names = new Set(
+          current.participants.map(({ name }) => name.trim().toLowerCase()),
+        );
+        const participants = [...current.participants];
+        const checkedInIds = [...current.checkedInIds];
+        let added = 0;
+        let duplicates = 0;
+
+        for (const participant of importedParticipants) {
+          const nameKey = participant.name.toLowerCase();
+          if (names.has(nameKey)) {
+            duplicates++;
+            continue;
+          }
+
+          names.add(nameKey);
+          const id = participants.length + 1;
+          participants.push({ id, name: participant.name });
+          if (participant.checkedIn) checkedInIds.push(id);
+          added++;
+        }
+
+        return {
+          participants,
+          checkedInIds,
+          importMessage: `Import complete. Added: ${added}. Duplicates skipped: ${duplicates}.`,
+        };
+      });
+    } catch (error) {
+      setRoster((current) => ({
+        ...current,
+        importMessage: error instanceof Error ? error.message : "The CSV could not be imported.",
+      }));
+    } finally {
+      setIsImporting(false);
+    }
+  }
+
+  function exportParticipantsCsv() {
+    if (participants.length === 0) {
+      setExportMessage("There are no participants to export. Add a participant first.");
+      return;
+    }
+
+    setExportMessage("");
+    const rows = participants.map(({ id, name }) => {
+      // Quoted CSV fields preserve commas and newlines. Double any quotes inside.
+      const csvName = `"${name.replace(/"/g, '""')}"`;
+      const status = checkedInIds.includes(id) ? "Checked In" : "Not Checked In";
+      return `${csvName},${status}`;
+    });
+    const csv = ["Name,Status", ...rows].join("\r\n") + "\r\n";
+    const file = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const downloadUrl = URL.createObjectURL(file);
+    const link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = "eventflow-participants.csv";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
   }
 
   return (
@@ -103,9 +196,41 @@ export default function Dashboard() {
         </div>
 
         <section aria-labelledby="participants-heading" className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-          <h2 id="participants-heading" className="px-4 py-5 text-lg font-semibold sm:px-6">
-            Participants
-          </h2>
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
+            <h2 id="participants-heading" className="text-lg font-semibold">
+              Participants
+            </h2>
+            <div className="flex flex-wrap gap-2">
+              <input
+                ref={csvInput}
+                type="file"
+                accept=".csv,text/csv"
+                hidden
+                onChange={importParticipantsCsv}
+              />
+              <button
+                type="button"
+                onClick={() => csvInput.current?.click()}
+                disabled={isImporting}
+                className="min-h-10 rounded-lg border border-teal-800 px-3 text-sm font-medium text-teal-800 enabled:hover:bg-teal-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-60"
+              >
+                {isImporting ? "Importing…" : "Import CSV"}
+              </button>
+              <button
+                type="button"
+                onClick={exportParticipantsCsv}
+                className="min-h-10 rounded-lg border border-teal-800 px-3 text-sm font-medium text-teal-800 hover:bg-teal-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
+              >
+                Export CSV
+              </button>
+            </div>
+          </div>
+          <p role="status" className={importMessage ? "px-4 pb-4 text-sm text-slate-600 sm:px-6" : "sr-only"}>
+            {importMessage}
+          </p>
+          <p role="status" className={exportMessage ? "px-4 pb-4 text-sm text-slate-600 sm:px-6" : "sr-only"}>
+            {exportMessage}
+          </p>
           <div className="grid gap-5 px-4 pb-5 sm:grid-cols-[3fr_2fr] sm:px-6">
             <form onSubmit={addParticipant}>
               <label htmlFor="participant-name" className="block text-sm font-medium text-slate-700">
