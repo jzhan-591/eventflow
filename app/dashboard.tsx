@@ -1,31 +1,46 @@
 "use client";
 
-import { useActionState, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { useActionState, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { logOut } from "./auth/actions";
+import { saveCheckIn, saveParticipant } from "./participants/actions";
+import type { Participant, SavedParticipant } from "./participants/data";
 import { parseParticipantCsv, type ImportedParticipant } from "./participant-csv";
 import { previewParticipantSync } from "./participant-sync";
-import VolunteerScheduling, { type Schedule } from "./volunteer-scheduling";
+import VolunteerScheduling from "./volunteer-scheduling";
+import type { Shift } from "./shifts/model";
 
-const initialParticipants = [
-  { id: 1, name: "Avery Morgan" },
-  { id: 2, name: "Jordan Lee" },
-  { id: 3, name: "Taylor Brooks" },
-  { id: 4, name: "Cameron Patel" },
-  { id: 5, name: "Riley Chen" },
-];
+const temporaryIdPrefix = "csv-";
 
-export default function Dashboard() {
+export default function Dashboard({
+  eventOverview,
+  eventId,
+  initialParticipants,
+  participantLoadFailed,
+  initialShifts,
+  shiftLoadFailed,
+}: {
+  eventOverview: ReactNode;
+  eventId: string | null;
+  initialParticipants: SavedParticipant[];
+  participantLoadFailed: boolean;
+  initialShifts: Shift[];
+  shiftLoadFailed: boolean;
+}) {
   const [logoutState, submitLogout, isLoggingOut] = useActionState(logOut, {});
-  const [{ participants, checkedInIds, importMessage, schedule }, setRoster] = useState({
-    participants: initialParticipants,
-    checkedInIds: [] as number[],
+  const [{ participants, checkedInIds, importMessage }, setRoster] = useState({
+    participants: initialParticipants as Participant[],
+    checkedInIds: initialParticipants.filter(({ checked_in }) => checked_in).map(({ id }) => id),
     importMessage: "",
-    nextParticipantId: initialParticipants.length + 1,
-    schedule: { shifts: [], error: "" } as Schedule,
+    nextParticipantId: 1,
   });
+  const [savedParticipants, setSavedParticipants] = useState<Participant[]>(initialParticipants);
+  const [shifts, setShifts] = useState(initialShifts);
   const [participantName, setParticipantName] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [nameError, setNameError] = useState("");
+  const [isSavingParticipant, setIsSavingParticipant] = useState(false);
+  const [pendingCheckIn, setPendingCheckIn] = useState<string | null>(null);
+  const [checkInError, setCheckInError] = useState("");
   const [exportMessage, setExportMessage] = useState("");
   const [isImporting, setIsImporting] = useState(false);
   const csvInput = useRef<HTMLInputElement>(null);
@@ -33,7 +48,7 @@ export default function Dashboard() {
   const [syncRows, setSyncRows] = useState<ImportedParticipant[] | null>(null);
   const [syncMessage, setSyncMessage] = useState("");
   const [isReadingSync, setIsReadingSync] = useState(false);
-  const syncPreview = syncRows ? previewParticipantSync(participants, schedule.shifts, syncRows) : null;
+  const syncPreview = syncRows ? previewParticipantSync(participants, shifts, syncRows) : null;
 
   const checkedInCount = checkedInIds.length;
   const total = participants.length;
@@ -42,8 +57,9 @@ export default function Dashboard() {
     participant.name.toLowerCase().includes(searchName),
   );
 
-  function addParticipant(event: FormEvent<HTMLFormElement>) {
+  async function addParticipant(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!eventId || participantLoadFailed || isSavingParticipant || isImporting) return;
     const name = participantName.trim().replace(/\s+/g, " ");
 
     if (!name) {
@@ -52,7 +68,7 @@ export default function Dashboard() {
     }
 
     const nameExists = participants.some(
-      (participant) => participant.name.toLowerCase() === name.toLowerCase(),
+      (participant) => participant.name.trim().toLowerCase() === name.toLowerCase(),
     );
 
     if (nameExists) {
@@ -60,25 +76,54 @@ export default function Dashboard() {
       return;
     }
 
-    setRoster((current) => ({
-      ...current,
-      participants: [
-        ...current.participants,
-        { id: current.nextParticipantId, name },
-      ],
-      nextParticipantId: current.nextParticipantId + 1,
-    }));
-    setParticipantName("");
     setNameError("");
-    setSearchQuery("");
+    setIsSavingParticipant(true);
+    try {
+      const result = await saveParticipant(eventId, name);
+      if (!result.participant) {
+        setNameError(result.error ?? "We couldn't save the participant. Try again.");
+        return;
+      }
+
+      const { id, name: savedName } = result.participant;
+      setSavedParticipants((current) => [...current, { id, name: savedName }]);
+      setRoster((current) => ({
+        ...current,
+        participants: [...current.participants, { id, name: savedName }],
+      }));
+      setParticipantName("");
+      setSearchQuery("");
+    } catch {
+      setNameError("We couldn't save the participant. Try again.");
+    } finally {
+      setIsSavingParticipant(false);
+    }
   }
 
-  function checkIn(id: number) {
-    setRoster((current) =>
-      current.checkedInIds.includes(id)
-        ? current
-        : { ...current, checkedInIds: [...current.checkedInIds, id] },
-    );
+  async function checkIn(id: string) {
+    if (pendingCheckIn || checkedInIds.includes(id)) return;
+    setCheckInError("");
+
+    if (!id.startsWith(temporaryIdPrefix)) {
+      if (!eventId) return;
+      setPendingCheckIn(id);
+      try {
+        const result = await saveCheckIn(eventId, id);
+        if (!result.ok) {
+          setCheckInError(result.error ?? "We couldn't check in this participant. Try again.");
+          return;
+        }
+      } catch {
+        setCheckInError("We couldn't check in this participant. Try again.");
+        return;
+      } finally {
+        setPendingCheckIn(null);
+      }
+    }
+
+    setRoster((current) => current.checkedInIds.includes(id)
+      ? current
+      : { ...current, checkedInIds: [...current.checkedInIds, id] });
   }
 
   async function importParticipantsCsv(event: ChangeEvent<HTMLInputElement>) {
@@ -115,7 +160,7 @@ export default function Dashboard() {
           }
 
           names.add(nameKey);
-          const id = current.nextParticipantId + added;
+          const id = temporaryIdPrefix + (current.nextParticipantId + added);
           participants.push({ id, name: participant.name });
           if (participant.checkedIn) checkedInIds.push(id);
           added++;
@@ -168,17 +213,17 @@ export default function Dashboard() {
   }
 
   function confirmSync() {
-    if (!syncRows || isImporting) return;
+    if (!syncRows || isImporting || isSavingParticipant || pendingCheckIn) return;
 
     setRoster((current) => {
       const { added, removedIds } = previewParticipantSync(
-        current.participants, current.schedule.shifts, syncRows,
+        current.participants, shifts, syncRows,
       );
       const participants = current.participants.filter(({ id }) => !removedIds.has(id));
       const checkedInIds = current.checkedInIds.filter((id) => !removedIds.has(id));
 
       added.forEach(({ name, checkedIn }, index) => {
-        const id = current.nextParticipantId + index;
+        const id = temporaryIdPrefix + (current.nextParticipantId + index);
         participants.push({ id, name });
         if (checkedIn) checkedInIds.push(id);
       });
@@ -188,14 +233,10 @@ export default function Dashboard() {
         participants,
         checkedInIds,
         nextParticipantId: current.nextParticipantId + added.length,
-        schedule: {
-          ...current.schedule,
-          shifts: current.schedule.shifts.filter(({ volunteerId }) => !removedIds.has(volunteerId)),
-        },
       };
     });
     setSyncRows(null);
-    setSyncMessage("Participant list synced successfully.");
+    setSyncMessage("CSV changes applied to this page. Reloading restores the saved roster.");
   }
 
   function exportParticipantsCsv() {
@@ -246,18 +287,7 @@ export default function Dashboard() {
 
       <main className="mx-auto max-w-5xl space-y-6 px-4 py-8 sm:px-8 sm:py-10">
         <div className="grid gap-4 md:grid-cols-[2fr_1fr]">
-          <section aria-labelledby="event-heading" className="rounded-2xl bg-teal-950 p-6 text-white sm:p-7">
-            <h2 id="event-heading" className="text-sm font-semibold text-teal-200">
-              Event Overview
-            </h2>
-            <p className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
-              Community Volunteer Day
-            </p>
-            <p className="mt-4 text-sm text-teal-100">
-              <time dateTime="2026-12-05T09:00:00-08:00">Saturday, December 5, 2026 · 9:00 AM PT</time>
-            </p>
-            <p className="mt-1 text-sm text-teal-100">Maplewood Community Center · Seattle, WA</p>
-          </section>
+          {eventOverview}
 
           <section aria-labelledby="progress-heading" className="flex flex-col justify-center rounded-2xl border border-slate-200 bg-white p-6">
             <h2 id="progress-heading" className="text-sm font-semibold text-slate-600">
@@ -273,7 +303,7 @@ export default function Dashboard() {
               aria-labelledby="progress-heading"
               className="mt-4 h-2 w-full overflow-hidden rounded-full bg-slate-100 [&::-moz-progress-bar]:bg-teal-700 [&::-webkit-progress-bar]:bg-slate-100 [&::-webkit-progress-value]:bg-teal-700"
               value={checkedInCount}
-              max={total}
+                max={Math.max(1, total)}
             />
           </section>
         </div>
@@ -294,7 +324,7 @@ export default function Dashboard() {
               <button
                 type="button"
                 onClick={() => csvInput.current?.click()}
-                disabled={isImporting}
+                disabled={isImporting || isSavingParticipant}
                 className="min-h-10 rounded-lg border border-teal-800 px-3 text-sm font-medium text-teal-800 enabled:hover:bg-teal-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-60"
               >
                 {isImporting ? "Importing…" : "Import CSV"}
@@ -323,6 +353,20 @@ export default function Dashboard() {
               </button>
             </div>
           </div>
+          <p className="px-4 pb-4 text-sm text-slate-600 sm:px-6">
+            CSV import and sync only change this page. Reloading restores the saved roster.
+          </p>
+          {participantLoadFailed && (
+            <p role="alert" className="px-4 pb-4 text-sm text-red-700 sm:px-6">
+              We couldn&apos;t load saved participants. Refresh the page to try again.
+            </p>
+          )}
+          {!eventId && (
+            <p className="px-4 pb-4 text-sm text-slate-600 sm:px-6">
+              An event is required to save participants.
+            </p>
+          )}
+          {checkInError && <p role="alert" className="px-4 pb-4 text-sm text-red-700 sm:px-6">{checkInError}</p>}
           <p role="status" className={importMessage ? "px-4 pb-4 text-sm text-slate-600 sm:px-6" : "sr-only"}>
             {importMessage}
           </p>
@@ -358,7 +402,7 @@ export default function Dashboard() {
               </div>
               {syncPreview.removedShifts.length > 0 && (
                 <div className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-950">
-                  <p className="font-semibold">Confirming this sync will also delete the following volunteer shifts ({syncPreview.removedShifts.length}).</p>
+                  <p className="font-semibold">These saved volunteer shifts will remain even if the CSV sync hides their participants from the roster ({syncPreview.removedShifts.length}).</p>
                   <ul className="mt-2 list-disc space-y-1 pl-5 [overflow-wrap:anywhere]">
                     {syncPreview.removedShifts.map((shift) => (
                       <li key={shift.id}>
@@ -373,7 +417,7 @@ export default function Dashboard() {
                 <button
                   type="button"
                   onClick={confirmSync}
-                  disabled={isImporting}
+                  disabled={isImporting || isSavingParticipant || Boolean(pendingCheckIn)}
                   className="min-h-10 rounded-lg bg-teal-800 px-3 text-sm font-medium text-white enabled:hover:bg-teal-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-60"
                 >
                   Confirm Sync
@@ -397,6 +441,7 @@ export default function Dashboard() {
                 <input
                   id="participant-name"
                   type="text"
+                  disabled={!eventId || participantLoadFailed || isSavingParticipant}
                   value={participantName}
                   onChange={(event) => {
                     setParticipantName(event.target.value);
@@ -409,9 +454,10 @@ export default function Dashboard() {
                 />
                 <button
                   type="submit"
-                  className="min-h-10 rounded-lg bg-teal-800 px-3 text-sm font-medium text-white hover:bg-teal-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
+                  disabled={!eventId || participantLoadFailed || isSavingParticipant || isImporting}
+                  className="min-h-10 rounded-lg bg-teal-800 px-3 text-sm font-medium text-white enabled:hover:bg-teal-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-60"
                 >
-                  Add Participant
+                  {isSavingParticipant ? "Saving…" : "Add Participant"}
                 </button>
               </div>
               {nameError && (
@@ -447,7 +493,9 @@ export default function Dashboard() {
               {visibleParticipants.length === 0 && (
                 <tr>
                   <td colSpan={3} className="px-4 py-6 text-slate-600 sm:px-6">
-                    No participants match your search.
+                    {participantLoadFailed ? "Saved participants are unavailable."
+                      : participants.length === 0 ? "No participants yet."
+                      : "No participants match your search."}
                   </td>
                 </tr>
               )}
@@ -458,6 +506,9 @@ export default function Dashboard() {
                   <tr key={participant.id}>
                     <th scope="row" className="px-3 py-3 font-medium [overflow-wrap:anywhere] sm:px-6">
                       {participant.name}
+                      {participant.id.startsWith(temporaryIdPrefix) && (
+                        <span className="mt-1 block text-xs text-slate-600">Temporary</span>
+                      )}
                     </th>
                     <td className="px-2 py-3 sm:px-6">
                       <span className={isCheckedIn
@@ -471,11 +522,11 @@ export default function Dashboard() {
                       <button
                         type="button"
                         aria-label={`Check in ${participant.name}`}
-                        disabled={isCheckedIn}
+                        disabled={isCheckedIn || Boolean(pendingCheckIn)}
                         onClick={() => checkIn(participant.id)}
                         className="min-h-10 whitespace-nowrap rounded-lg bg-teal-800 px-3 text-sm font-medium text-white enabled:hover:bg-teal-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:bg-slate-100 disabled:text-slate-500"
                       >
-                        Check In
+                        {pendingCheckIn === participant.id ? "Checking in…" : "Check In"}
                       </button>
                     </td>
                   </tr>
@@ -485,12 +536,11 @@ export default function Dashboard() {
           </table>
         </section>
         <VolunteerScheduling
-          participants={participants}
-          schedule={schedule}
-          setSchedule={(update) => setRoster((current) => ({
-            ...current,
-            schedule: update(current.schedule),
-          }))}
+          eventId={eventId}
+          participants={savedParticipants}
+          shifts={shifts}
+          setShifts={setShifts}
+          shiftLoadFailed={shiftLoadFailed}
         />
       </main>
     </div>

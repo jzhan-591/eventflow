@@ -1,82 +1,106 @@
-import type { FormEvent } from "react";
-
-const roles = ["Check-In Desk", "Event Setup", "Food Service", "Event Cleanup"];
-
-type Participant = { id: number; name: string };
-
-export type Shift = {
-  id: number;
-  volunteerId: number;
-  role: string;
-  startTime: string;
-  endTime: string;
-};
+import { useState, type Dispatch, type FormEvent, type SetStateAction } from "react";
+import type { Participant } from "./participants/data";
+import { removeShift, saveShift } from "./shifts/actions";
+import { roles, validateShiftTimes, type Shift } from "./shifts/model";
 
 const fieldClass = "mt-2 min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm focus-visible:outline-2 focus-visible:outline-teal-700";
 
-export type Schedule = { shifts: Shift[]; error: string };
-
 export default function VolunteerScheduling({
+  eventId,
   participants,
-  schedule: { shifts, error },
-  setSchedule,
+  shifts,
+  setShifts,
+  shiftLoadFailed,
 }: {
+  eventId: string | null;
   participants: Participant[];
-  schedule: Schedule;
-  setSchedule: (update: (current: Schedule) => Schedule) => void;
+  shifts: Shift[];
+  setShifts: Dispatch<SetStateAction<Shift[]>>;
+  shiftLoadFailed: boolean;
 }) {
-  function addShift(event: FormEvent<HTMLFormElement>) {
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
+
+  async function addShift(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const volunteerId = Number(form.get("volunteer"));
+    if (!eventId || pending || shiftLoadFailed) return;
+
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const volunteerId = String(form.get("volunteer") ?? "");
     const volunteer = participants.find(({ id }) => id === volunteerId);
-    const role = String(form.get("role"));
+    const role = String(form.get("role") ?? "");
     const startTime = String(form.get("startTime") ?? "");
     const endTime = String(form.get("endTime") ?? "");
 
-    if (!volunteer || !roles.includes(role) || !startTime || !endTime) {
-      setSchedule((current) => ({ ...current, error: "Choose a volunteer, a role, and both shift times." }));
+    if (!volunteer || !roles.includes(role)) {
+      setError("Choose a saved volunteer and a role.");
       return;
     }
 
-    if (endTime <= startTime) {
-      setSchedule((current) => ({ ...current, error: "End time must be later than start time." }));
+    const timeError = validateShiftTimes(startTime, endTime);
+    if (timeError) {
+      setError(timeError);
       return;
     }
 
-    setSchedule((current) => {
-      // Time inputs provide zero-padded HH:mm values that sort in time order.
-      const hasConflict = current.shifts.some(
-        (shift) =>
-          shift.volunteerId === volunteerId &&
-          startTime < shift.endTime &&
-          shift.startTime < endTime,
-      );
+    const hasConflict = shifts.some((shift) =>
+      shift.volunteerId === volunteerId &&
+      startTime < shift.endTime &&
+      shift.startTime < endTime,
+    );
+    if (hasConflict) {
+      setError(`${volunteer.name} already has a shift that overlaps these times.`);
+      return;
+    }
 
-      if (hasConflict) {
-        return { ...current, error: `${volunteer.name} already has a shift that overlaps these times.` };
+    setPending(true);
+    setError("");
+    try {
+      const result = await saveShift(eventId, volunteerId, role, startTime, endTime);
+      const shift = result.shift;
+      if (!shift) {
+        setError(result.error ?? "We couldn't save the shift. Try again.");
+        return;
       }
 
-      const id = (current.shifts.at(-1)?.id ?? 0) + 1;
-      return {
-        shifts: [...current.shifts, { id, volunteerId, role, startTime, endTime }],
-        error: "",
-      };
-    });
+      setShifts((current) => [...current, shift].sort((a, b) => a.startTime.localeCompare(b.startTime)));
+      formElement.reset();
+    } catch {
+      setError("We couldn't save the shift. Try again.");
+    } finally {
+      setPending(false);
+    }
   }
 
-  function deleteShift(id: number) {
-    setSchedule((current) => ({
-      shifts: current.shifts.filter((shift) => shift.id !== id),
-      error: "",
-    }));
+  async function deleteShift(id: string) {
+    if (!eventId || pending) return;
+
+    setPending(true);
+    setError("");
+    try {
+      const result = await removeShift(eventId, id);
+      if (!result.ok) {
+        setError(result.error ?? "We couldn't delete the shift. Try again.");
+        return;
+      }
+      setShifts((current) => current.filter((shift) => shift.id !== id));
+    } catch {
+      setError("We couldn't delete the shift. Try again.");
+    } finally {
+      setPending(false);
+    }
   }
 
   return (
     <section aria-labelledby="scheduling-heading" className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
       <div className="px-4 py-5 sm:px-6">
         <h2 id="scheduling-heading" className="text-lg font-semibold">Volunteer Scheduling</h2>
-        <p className="mt-1 text-sm text-slate-600">All shifts take place on the event date in Pacific Time.</p>
+        <p className="mt-1 text-sm text-slate-600">Shifts use Pacific Time on the event date. Only saved participants can be scheduled.</p>
+
+        {shiftLoadFailed && (
+          <p role="alert" className="mt-3 text-sm text-red-700">We couldn&apos;t load saved shifts. Refresh the page to try again.</p>
+        )}
 
         <form onSubmit={addShift} noValidate className="mt-5">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-[2fr_2fr_1fr_1fr]">
@@ -113,7 +137,8 @@ export default function VolunteerScheduling({
 
           <button
             type="submit"
-            className="mt-4 min-h-10 rounded-lg bg-teal-800 px-3 text-sm font-medium text-white hover:bg-teal-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
+            disabled={!eventId || participants.length === 0 || pending || shiftLoadFailed}
+            className="mt-4 min-h-10 rounded-lg bg-teal-800 px-3 text-sm font-medium text-white enabled:hover:bg-teal-900 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
           >
             Add Shift
           </button>
@@ -134,30 +159,28 @@ export default function VolunteerScheduling({
           <tbody className="divide-y divide-slate-100">
             {shifts.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-4 py-6 text-slate-600 sm:px-6">No shifts scheduled yet.</td>
+                <td colSpan={5} className="px-4 py-6 text-slate-600 sm:px-6">{shiftLoadFailed ? "Saved shifts are unavailable." : "No shifts scheduled yet."}</td>
               </tr>
             )}
-            {shifts.map((shift) => {
-              const volunteer = participants.find(({ id }) => id === shift.volunteerId);
-              return (
-                <tr key={shift.id}>
-                  <th scope="row" className="px-4 py-3 font-medium [overflow-wrap:anywhere] sm:px-6">{volunteer?.name}</th>
-                  <td className="px-4 py-3">{shift.role}</td>
-                  <td className="px-4 py-3 tabular-nums"><time>{shift.startTime}</time></td>
-                  <td className="px-4 py-3 tabular-nums"><time>{shift.endTime}</time></td>
-                  <td className="px-4 py-3 text-right sm:px-6">
-                    <button
-                      type="button"
-                      aria-label={`Delete ${volunteer?.name}'s ${shift.startTime} shift`}
-                      onClick={() => deleteShift(shift.id)}
-                      className="min-h-10 rounded-lg border border-slate-300 px-3 font-medium text-slate-700 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
-                    >
-                      Delete
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
+            {shifts.map((shift) => (
+              <tr key={shift.id}>
+                <th scope="row" className="px-4 py-3 font-medium [overflow-wrap:anywhere] sm:px-6">{shift.volunteerName}</th>
+                <td className="px-4 py-3">{shift.role}</td>
+                <td className="px-4 py-3 tabular-nums"><time>{shift.startTime}</time></td>
+                <td className="px-4 py-3 tabular-nums"><time>{shift.endTime}</time></td>
+                <td className="px-4 py-3 text-right sm:px-6">
+                  <button
+                    type="button"
+                    aria-label={`Delete ${shift.volunteerName}'s ${shift.startTime} shift`}
+                    onClick={() => deleteShift(shift.id)}
+                    disabled={pending}
+                    className="min-h-10 rounded-lg border border-slate-300 px-3 font-medium text-slate-700 enabled:hover:bg-slate-100 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>

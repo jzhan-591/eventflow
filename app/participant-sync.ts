@@ -1,7 +1,7 @@
 import type { ImportedParticipant } from "./participant-csv";
-import type { Shift } from "./volunteer-scheduling";
+import type { Shift } from "./shifts/model";
 
-type Participant = { id: number; name: string };
+import type { Participant } from "./participants/data";
 
 export function previewParticipantSync(
   participants: Participant[],
