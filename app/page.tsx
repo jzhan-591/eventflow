@@ -2,6 +2,7 @@
 
 import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { parseParticipantCsv } from "./participant-csv";
+import VolunteerScheduling from "./volunteer-scheduling";
 
 const initialParticipants = [
   { id: 1, name: "Avery Morgan" },
@@ -327,6 +328,7 @@ export default function Dashboard() {
             </tbody>
           </table>
         </section>
+        <VolunteerScheduling participants={participants} />
       </main>
     </div>
   );
