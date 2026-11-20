@@ -1,10 +1,10 @@
-import { useState, type FormEvent } from "react";
+import type { FormEvent } from "react";
 
 const roles = ["Check-In Desk", "Event Setup", "Food Service", "Event Cleanup"];
 
 type Participant = { id: number; name: string };
 
-type Shift = {
+export type Shift = {
   id: number;
   volunteerId: number;
   role: string;
@@ -14,12 +14,17 @@ type Shift = {
 
 const fieldClass = "mt-2 min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm focus-visible:outline-2 focus-visible:outline-teal-700";
 
-export default function VolunteerScheduling({ participants }: { participants: Participant[] }) {
-  const [{ shifts, error }, setSchedule] = useState({
-    shifts: [] as Shift[],
-    error: "",
-  });
+export type Schedule = { shifts: Shift[]; error: string };
 
+export default function VolunteerScheduling({
+  participants,
+  schedule: { shifts, error },
+  setSchedule,
+}: {
+  participants: Participant[];
+  schedule: Schedule;
+  setSchedule: (update: (current: Schedule) => Schedule) => void;
+}) {
   function addShift(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);

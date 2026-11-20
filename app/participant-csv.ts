@@ -1,4 +1,4 @@
-type ImportedParticipant = {
+export type ImportedParticipant = {
   name: string;
   checkedIn: boolean;
 };

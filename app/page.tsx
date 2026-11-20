@@ -1,8 +1,9 @@
 "use client";
 
 import { useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { parseParticipantCsv } from "./participant-csv";
-import VolunteerScheduling from "./volunteer-scheduling";
+import { parseParticipantCsv, type ImportedParticipant } from "./participant-csv";
+import { previewParticipantSync } from "./participant-sync";
+import VolunteerScheduling, { type Schedule } from "./volunteer-scheduling";
 
 const initialParticipants = [
   { id: 1, name: "Avery Morgan" },
@@ -13,10 +14,12 @@ const initialParticipants = [
 ];
 
 export default function Dashboard() {
-  const [{ participants, checkedInIds, importMessage }, setRoster] = useState({
+  const [{ participants, checkedInIds, importMessage, schedule }, setRoster] = useState({
     participants: initialParticipants,
     checkedInIds: [] as number[],
     importMessage: "",
+    nextParticipantId: initialParticipants.length + 1,
+    schedule: { shifts: [], error: "" } as Schedule,
   });
   const [participantName, setParticipantName] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -24,6 +27,11 @@ export default function Dashboard() {
   const [exportMessage, setExportMessage] = useState("");
   const [isImporting, setIsImporting] = useState(false);
   const csvInput = useRef<HTMLInputElement>(null);
+  const syncInput = useRef<HTMLInputElement>(null);
+  const [syncRows, setSyncRows] = useState<ImportedParticipant[] | null>(null);
+  const [syncMessage, setSyncMessage] = useState("");
+  const [isReadingSync, setIsReadingSync] = useState(false);
+  const syncPreview = syncRows ? previewParticipantSync(participants, schedule.shifts, syncRows) : null;
 
   const checkedInCount = checkedInIds.length;
   const total = participants.length;
@@ -54,8 +62,9 @@ export default function Dashboard() {
       ...current,
       participants: [
         ...current.participants,
-        { id: current.participants.length + 1, name },
+        { id: current.nextParticipantId, name },
       ],
+      nextParticipantId: current.nextParticipantId + 1,
     }));
     setParticipantName("");
     setNameError("");
@@ -104,15 +113,17 @@ export default function Dashboard() {
           }
 
           names.add(nameKey);
-          const id = participants.length + 1;
+          const id = current.nextParticipantId + added;
           participants.push({ id, name: participant.name });
           if (participant.checkedIn) checkedInIds.push(id);
           added++;
         }
 
         return {
+          ...current,
           participants,
           checkedInIds,
+          nextParticipantId: current.nextParticipantId + added,
           importMessage: `Import complete. Added: ${added}. Duplicates skipped: ${duplicates}.`,
         };
       });
@@ -124,6 +135,65 @@ export default function Dashboard() {
     } finally {
       setIsImporting(false);
     }
+  }
+
+  async function readSyncCsv(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+
+    setSyncRows(null);
+    setSyncMessage("");
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      setSyncMessage("Choose a .csv file to sync.");
+      return;
+    }
+
+    setIsReadingSync(true);
+    try {
+      const text = await file.text().catch(() => {
+        throw new Error("The file could not be read. Select the CSV file and try again.");
+      });
+      if (!text.trim()) throw new Error("The CSV file is empty.");
+      const rows = parseParticipantCsv(text);
+      if (rows.length === 0) throw new Error("The CSV must contain at least one participant to sync.");
+      setSyncRows(rows);
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : "The CSV could not be read for syncing.");
+    } finally {
+      setIsReadingSync(false);
+    }
+  }
+
+  function confirmSync() {
+    if (!syncRows || isImporting) return;
+
+    setRoster((current) => {
+      const { added, removedIds } = previewParticipantSync(
+        current.participants, current.schedule.shifts, syncRows,
+      );
+      const participants = current.participants.filter(({ id }) => !removedIds.has(id));
+      const checkedInIds = current.checkedInIds.filter((id) => !removedIds.has(id));
+
+      added.forEach(({ name, checkedIn }, index) => {
+        const id = current.nextParticipantId + index;
+        participants.push({ id, name });
+        if (checkedIn) checkedInIds.push(id);
+      });
+
+      return {
+        ...current,
+        participants,
+        checkedInIds,
+        nextParticipantId: current.nextParticipantId + added.length,
+        schedule: {
+          ...current.schedule,
+          shifts: current.schedule.shifts.filter(({ volunteerId }) => !removedIds.has(volunteerId)),
+        },
+      };
+    });
+    setSyncRows(null);
+    setSyncMessage("Participant list synced successfully.");
   }
 
   function exportParticipantsCsv() {
@@ -224,6 +294,21 @@ export default function Dashboard() {
               >
                 Export CSV
               </button>
+              <input
+                ref={syncInput}
+                type="file"
+                accept=".csv,text/csv"
+                hidden
+                onChange={readSyncCsv}
+              />
+              <button
+                type="button"
+                onClick={() => syncInput.current?.click()}
+                disabled={isReadingSync}
+                className="min-h-10 rounded-lg border border-teal-800 px-3 text-sm font-medium text-teal-800 enabled:hover:bg-teal-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-60"
+              >
+                {isReadingSync ? "Reading CSV…" : "Sync CSV"}
+              </button>
             </div>
           </div>
           <p role="status" className={importMessage ? "px-4 pb-4 text-sm text-slate-600 sm:px-6" : "sr-only"}>
@@ -232,6 +317,65 @@ export default function Dashboard() {
           <p role="status" className={exportMessage ? "px-4 pb-4 text-sm text-slate-600 sm:px-6" : "sr-only"}>
             {exportMessage}
           </p>
+          <p role="status" className={syncMessage ? "px-4 pb-4 text-sm text-slate-700 sm:px-6" : "sr-only"}>
+            {syncMessage}
+          </p>
+          {syncPreview && (
+            <section aria-labelledby="sync-preview-heading" className="mx-4 mb-5 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:mx-6">
+              <h3 id="sync-preview-heading" className="font-semibold">Sync Preview</h3>
+              <p className="mt-1 text-sm text-slate-600">
+                Unchanged participants: {syncPreview.unchangedCount}
+              </p>
+              <div className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
+                <div>
+                  <h4 className="font-semibold">New Participants ({syncPreview.added.length})</h4>
+                  {syncPreview.added.length ? (
+                    <ul className="mt-2 list-disc space-y-1 pl-5 [overflow-wrap:anywhere]">
+                      {syncPreview.added.map(({ name }) => <li key={name}>{name}</li>)}
+                    </ul>
+                  ) : <p className="mt-2 text-slate-600">None</p>}
+                </div>
+                <div>
+                  <h4 className="font-semibold">Participants to Remove ({syncPreview.removed.length})</h4>
+                  {syncPreview.removed.length ? (
+                    <ul className="mt-2 list-disc space-y-1 pl-5 [overflow-wrap:anywhere]">
+                      {syncPreview.removed.map(({ id, name }) => <li key={id}>{name}</li>)}
+                    </ul>
+                  ) : <p className="mt-2 text-slate-600">None</p>}
+                </div>
+              </div>
+              {syncPreview.removedShifts.length > 0 && (
+                <div className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-950">
+                  <p className="font-semibold">Confirming this sync will also delete the following volunteer shifts ({syncPreview.removedShifts.length}).</p>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 [overflow-wrap:anywhere]">
+                    {syncPreview.removedShifts.map((shift) => (
+                      <li key={shift.id}>
+                        {syncPreview.removed.find(({ id }) => id === shift.volunteerId)?.name}
+                        {" · "}{shift.role}{" · "}{shift.startTime}–{shift.endTime}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={confirmSync}
+                  disabled={isImporting}
+                  className="min-h-10 rounded-lg bg-teal-800 px-3 text-sm font-medium text-white enabled:hover:bg-teal-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-60"
+                >
+                  Confirm Sync
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSyncRows(null)}
+                  className="min-h-10 rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-700 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
+                >
+                  Cancel
+                </button>
+              </div>
+            </section>
+          )}
           <div className="grid gap-5 px-4 pb-5 sm:grid-cols-[3fr_2fr] sm:px-6">
             <form onSubmit={addParticipant}>
               <label htmlFor="participant-name" className="block text-sm font-medium text-slate-700">
@@ -328,7 +472,14 @@ export default function Dashboard() {
             </tbody>
           </table>
         </section>
-        <VolunteerScheduling participants={participants} />
+        <VolunteerScheduling
+          participants={participants}
+          schedule={schedule}
+          setSchedule={(update) => setRoster((current) => ({
+            ...current,
+            schedule: update(current.schedule),
+          }))}
+        />
       </main>
     </div>
   );
