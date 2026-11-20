@@ -3,6 +3,15 @@ export type ImportedParticipant = {
   checkedIn: boolean;
 };
 
+export function serializeParticipantCsv(participants: { name: string; checked_in: boolean }[]) {
+  const rows = participants.map(({ name, checked_in }) => {
+    // Quoted fields preserve commas, quotes, and line breaks.
+    const csvName = `"${name.replace(/"/g, '""')}"`;
+    return `${csvName},${checked_in ? "Checked In" : "Not Checked In"}`;
+  });
+  return ["Name,Status", ...rows].join("\r\n") + "\r\n";
+}
+
 function readCsvRows(text: string) {
   const csv = text.replace(/^\uFEFF/, "");
   const rows: string[][] = [];

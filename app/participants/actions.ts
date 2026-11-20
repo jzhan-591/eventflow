@@ -2,6 +2,7 @@
 
 import { getCurrentEvent } from "../events/current";
 import { participantColumns, readParticipants } from "./data";
+import { participantIdForName, participantNameKey } from "./write";
 
 export async function saveParticipant(eventId: string, rawName: string) {
   const name = rawName.trim().replace(/\s+/g, " ");
@@ -14,22 +15,25 @@ export async function saveParticipant(eventId: string, rawName: string) {
   if (roster.error) return { error: "We couldn't check for duplicate names. Try again." };
 
   const duplicateError = "A participant with this name is already on the list.";
-  if (roster.participants.some((participant) => participant.name.trim().toLowerCase() === name.toLowerCase())) {
+  if (roster.participants.some((participant) => participantNameKey(participant.name) === participantNameKey(name))) {
     return { error: duplicateError };
   }
 
   const result = await supabase
     .schema("public")
     .from("participants")
-    .insert({ event_id: eventId, full_name: name, checked_in: false })
+    .upsert(
+      { id: participantIdForName(eventId, name), event_id: eventId, full_name: name, checked_in: false },
+      { onConflict: "id", ignoreDuplicates: true },
+    )
     .select(participantColumns)
-    .single();
+    .maybeSingle();
 
   if (result.error) {
     return { error: result.error.code === "23505" ? duplicateError : "We couldn't save the participant. Try again." };
   }
 
-  return { participant: result.data };
+  return result.data ? { participant: result.data } : { error: duplicateError };
 }
 
 export async function saveCheckIn(eventId: string, participantId: string) {

@@ -3,6 +3,7 @@
 import { useActionState, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { logOut } from "./auth/actions";
 import { saveCheckIn, saveParticipant } from "./participants/actions";
+import { exportSavedParticipants, importSavedParticipants } from "./participants/csv-actions";
 import type { Participant, SavedParticipant } from "./participants/data";
 import { parseParticipantCsv, type ImportedParticipant } from "./participant-csv";
 import { previewParticipantSync } from "./participant-sync";
@@ -43,6 +44,7 @@ export default function Dashboard({
   const [checkInError, setCheckInError] = useState("");
   const [exportMessage, setExportMessage] = useState("");
   const [isImporting, setIsImporting] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const csvInput = useRef<HTMLInputElement>(null);
   const syncInput = useRef<HTMLInputElement>(null);
   const [syncRows, setSyncRows] = useState<ImportedParticipant[] | null>(null);
@@ -129,7 +131,7 @@ export default function Dashboard({
   async function importParticipantsCsv(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
-    if (!file) return;
+    if (!file || !eventId || isImporting || isSavingParticipant) return;
 
     if (!file.name.toLowerCase().endsWith(".csv")) {
       setRoster((current) => ({ ...current, importMessage: "Choose a .csv file to import." }));
@@ -141,37 +143,32 @@ export default function Dashboard({
       const text = await file.text().catch(() => {
         throw new Error("The file could not be read. Select the CSV file and try again.");
       });
-      const importedParticipants = parseParticipantCsv(text);
+      const result = await importSavedParticipants(eventId, text);
+      if (!result.added) {
+        setRoster((current) => ({ ...current, importMessage: result.error ?? "The CSV could not be imported." }));
+        return;
+      }
 
+      const { added, duplicates, failed, errors } = result;
+      const summary = `Added: ${added.length}. Duplicates skipped: ${duplicates}. Failed: ${failed}.`;
+      const details = errors.length ? ` Database errors: ${errors.join("; ")}` : "";
+      const addedNames = new Set(added.map(({ name }) => name.trim().toLowerCase()));
+
+      setSavedParticipants((current) => [...current, ...added]);
       setRoster((current) => {
-        const names = new Set(
-          current.participants.map(({ name }) => name.trim().toLowerCase()),
-        );
-        const participants = [...current.participants];
-        const checkedInIds = [...current.checkedInIds];
-        let added = 0;
-        let duplicates = 0;
-
-        for (const participant of importedParticipants) {
-          const nameKey = participant.name.toLowerCase();
-          if (names.has(nameKey)) {
-            duplicates++;
-            continue;
-          }
-
-          names.add(nameKey);
-          const id = temporaryIdPrefix + (current.nextParticipantId + added);
-          participants.push({ id, name: participant.name });
-          if (participant.checkedIn) checkedInIds.push(id);
-          added++;
-        }
+        // Replace temporary CSV entries when the same names are actually saved.
+        const replacedIds = new Set(current.participants
+          .filter(({ id, name }) => id.startsWith(temporaryIdPrefix) && addedNames.has(name.trim().toLowerCase()))
+          .map(({ id }) => id));
 
         return {
           ...current,
-          participants,
-          checkedInIds,
-          nextParticipantId: current.nextParticipantId + added,
-          importMessage: `Import complete. Added: ${added}. Duplicates skipped: ${duplicates}.`,
+          participants: [...current.participants.filter(({ id }) => !replacedIds.has(id)), ...added],
+          checkedInIds: [
+            ...current.checkedInIds.filter((id) => !replacedIds.has(id)),
+            ...added.filter(({ checked_in }) => checked_in).map(({ id }) => id),
+          ],
+          importMessage: summary + details,
         };
       });
     } catch (error) {
@@ -236,32 +233,35 @@ export default function Dashboard({
       };
     });
     setSyncRows(null);
-    setSyncMessage("CSV changes applied to this page. Reloading restores the saved roster.");
+    setSyncMessage("Temporary CSV sync applied. Reloading restores the saved roster.");
   }
 
-  function exportParticipantsCsv() {
-    if (participants.length === 0) {
-      setExportMessage("There are no participants to export. Add a participant first.");
-      return;
-    }
+  async function exportParticipantsCsv() {
+    if (!eventId || isExporting) return;
 
     setExportMessage("");
-    const rows = participants.map(({ id, name }) => {
-      // Quoted CSV fields preserve commas and newlines. Double any quotes inside.
-      const csvName = `"${name.replace(/"/g, '""')}"`;
-      const status = checkedInIds.includes(id) ? "Checked In" : "Not Checked In";
-      return `${csvName},${status}`;
-    });
-    const csv = ["Name,Status", ...rows].join("\r\n") + "\r\n";
-    const file = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const downloadUrl = URL.createObjectURL(file);
-    const link = document.createElement("a");
-    link.href = downloadUrl;
-    link.download = "eventflow-participants.csv";
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
+    setIsExporting(true);
+    try {
+      const result = await exportSavedParticipants(eventId);
+      if (!result.csv) {
+        setExportMessage(result.error ?? "The CSV could not be exported.");
+        return;
+      }
+
+      const file = new Blob([result.csv], { type: "text/csv;charset=utf-8" });
+      const downloadUrl = URL.createObjectURL(file);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = "eventflow-participants.csv";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
+    } catch {
+      setExportMessage("The CSV could not be exported. Try again.");
+    } finally {
+      setIsExporting(false);
+    }
   }
 
   return (
@@ -324,7 +324,7 @@ export default function Dashboard({
               <button
                 type="button"
                 onClick={() => csvInput.current?.click()}
-                disabled={isImporting || isSavingParticipant}
+                disabled={!eventId || isImporting || isSavingParticipant}
                 className="min-h-10 rounded-lg border border-teal-800 px-3 text-sm font-medium text-teal-800 enabled:hover:bg-teal-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-60"
               >
                 {isImporting ? "Importing…" : "Import CSV"}
@@ -332,9 +332,10 @@ export default function Dashboard({
               <button
                 type="button"
                 onClick={exportParticipantsCsv}
+                disabled={!eventId || isExporting || isImporting}
                 className="min-h-10 rounded-lg border border-teal-800 px-3 text-sm font-medium text-teal-800 hover:bg-teal-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
               >
-                Export CSV
+                {isExporting ? "Exporting…" : "Export CSV"}
               </button>
               <input
                 ref={syncInput}
@@ -354,7 +355,7 @@ export default function Dashboard({
             </div>
           </div>
           <p className="px-4 pb-4 text-sm text-slate-600 sm:px-6">
-            CSV import and sync only change this page. Reloading restores the saved roster.
+            Import and export use the saved event roster. Sync CSV only changes this page until you reload.
           </p>
           {participantLoadFailed && (
             <p role="alert" className="px-4 pb-4 text-sm text-red-700 sm:px-6">
