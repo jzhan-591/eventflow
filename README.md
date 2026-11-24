@@ -2,7 +2,11 @@
 
 **Event Check-in & Volunteer Management Web Application**
 
-EventFlow helps event organizers manage a roster, track attendance, and schedule volunteers. The repository is set up for local development and includes a reviewed database sync implementation for an approved test environment.
+EventFlow is an event operations dashboard for organizers. The full app includes Supabase authentication, participant management, check-in tracking, CSV roster sync, and volunteer scheduling.
+
+**[Try the Live Demo](https://eventflow-opal-one.vercel.app/demo)**
+
+Open the demo without logging in. It uses fictional sample data and provides a read-only experience without making changes to the live database.
 
 ## Features
 
