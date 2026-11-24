@@ -1,16 +1,16 @@
 "use client";
 
-import { useActionState, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
+import { useActionState, useLayoutEffect, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { logOut } from "./auth/actions";
 import { saveCheckIn, saveParticipant } from "./participants/actions";
 import { exportSavedParticipants, importSavedParticipants } from "./participants/csv-actions";
 import type { Participant, SavedParticipant } from "./participants/data";
-import { parseParticipantCsv, type ImportedParticipant } from "./participant-csv";
-import { previewParticipantSync } from "./participant-sync";
+import { confirmParticipantSync, prepareParticipantSync } from "./participants/sync-actions";
 import VolunteerScheduling from "./volunteer-scheduling";
 import type { Shift } from "./shifts/model";
 
-const temporaryIdPrefix = "csv-";
+type SyncPreview = Extract<Awaited<ReturnType<typeof prepareParticipantSync>>, { preview: unknown }>;
+type RosterOperation = "add-participant" | "check-in" | "import" | "preview" | "sync" | "shift";
 
 export default function Dashboard({
   eventOverview,
@@ -32,25 +32,43 @@ export default function Dashboard({
     participants: initialParticipants as Participant[],
     checkedInIds: initialParticipants.filter(({ checked_in }) => checked_in).map(({ id }) => id),
     importMessage: "",
-    nextParticipantId: 1,
   });
-  const [savedParticipants, setSavedParticipants] = useState<Participant[]>(initialParticipants);
   const [shifts, setShifts] = useState(initialShifts);
   const [participantName, setParticipantName] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [nameError, setNameError] = useState("");
-  const [isSavingParticipant, setIsSavingParticipant] = useState(false);
+  const [rosterOperation, setOperation] = useState<{ operation: RosterOperation | "reload-required" | null }>({ operation: null });
+  const { operation } = rosterOperation;
+  const rosterLocked = useRef(false);
   const [pendingCheckIn, setPendingCheckIn] = useState<string | null>(null);
   const [checkInError, setCheckInError] = useState("");
   const [exportMessage, setExportMessage] = useState("");
-  const [isImporting, setIsImporting] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const csvInput = useRef<HTMLInputElement>(null);
   const syncInput = useRef<HTMLInputElement>(null);
-  const [syncRows, setSyncRows] = useState<ImportedParticipant[] | null>(null);
+  const [syncFile, setSyncFile] = useState<(SyncPreview & { text: string }) | null>(null);
   const [syncMessage, setSyncMessage] = useState("");
-  const [isReadingSync, setIsReadingSync] = useState(false);
-  const syncPreview = syncRows ? previewParticipantSync(participants, shifts, syncRows) : null;
+  const syncPreview = syncFile?.preview;
+  const isRosterBusy = operation !== null;
+  const isSavingParticipant = operation === "add-participant";
+  const isImporting = operation === "import";
+  const isReadingSync = operation === "preview";
+
+  useLayoutEffect(() => {
+    // Release the lock after React has committed the roster and schedule updates.
+    if (rosterOperation.operation === null) rosterLocked.current = false;
+  }, [rosterOperation]);
+
+  function beginOperation(nextOperation: RosterOperation) {
+    if (rosterLocked.current) return false;
+    rosterLocked.current = true;
+    setOperation({ operation: nextOperation });
+    return true;
+  }
+
+  function finishOperation(reloadRequired = false) {
+    setOperation({ operation: reloadRequired ? "reload-required" : null });
+  }
 
   const checkedInCount = checkedInIds.length;
   const total = participants.length;
@@ -61,7 +79,7 @@ export default function Dashboard({
 
   async function addParticipant(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!eventId || participantLoadFailed || isSavingParticipant || isImporting) return;
+    if (!eventId || participantLoadFailed || rosterLocked.current) return;
     const name = participantName.trim().replace(/\s+/g, " ");
 
     if (!name) {
@@ -78,8 +96,8 @@ export default function Dashboard({
       return;
     }
 
+    if (!beginOperation("add-participant")) return;
     setNameError("");
-    setIsSavingParticipant(true);
     try {
       const result = await saveParticipant(eventId, name);
       if (!result.participant) {
@@ -88,7 +106,6 @@ export default function Dashboard({
       }
 
       const { id, name: savedName } = result.participant;
-      setSavedParticipants((current) => [...current, { id, name: savedName }]);
       setRoster((current) => ({
         ...current,
         participants: [...current.participants, { id, name: savedName }],
@@ -98,47 +115,43 @@ export default function Dashboard({
     } catch {
       setNameError("We couldn't save the participant. Try again.");
     } finally {
-      setIsSavingParticipant(false);
+      finishOperation();
     }
   }
 
   async function checkIn(id: string) {
-    if (pendingCheckIn || checkedInIds.includes(id)) return;
+    if (!eventId || checkedInIds.includes(id) || !beginOperation("check-in")) return;
     setCheckInError("");
-
-    if (!id.startsWith(temporaryIdPrefix)) {
-      if (!eventId) return;
-      setPendingCheckIn(id);
-      try {
-        const result = await saveCheckIn(eventId, id);
-        if (!result.ok) {
-          setCheckInError(result.error ?? "We couldn't check in this participant. Try again.");
-          return;
-        }
-      } catch {
-        setCheckInError("We couldn't check in this participant. Try again.");
+    setPendingCheckIn(id);
+    try {
+      const result = await saveCheckIn(eventId, id);
+      if (!result.ok) {
+        setCheckInError(result.error ?? "We couldn't check in this participant. Try again.");
         return;
-      } finally {
-        setPendingCheckIn(null);
       }
+      setRoster((current) => current.checkedInIds.includes(id)
+        ? current
+        : { ...current, checkedInIds: [...current.checkedInIds, id] });
+    } catch {
+      setCheckInError("We couldn't check in this participant. Try again.");
+      return;
+    } finally {
+      setPendingCheckIn(null);
+      finishOperation();
     }
-
-    setRoster((current) => current.checkedInIds.includes(id)
-      ? current
-      : { ...current, checkedInIds: [...current.checkedInIds, id] });
   }
 
   async function importParticipantsCsv(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
-    if (!file || !eventId || isImporting || isSavingParticipant) return;
+    if (!file || !eventId || rosterLocked.current) return;
 
     if (!file.name.toLowerCase().endsWith(".csv")) {
       setRoster((current) => ({ ...current, importMessage: "Choose a .csv file to import." }));
       return;
     }
 
-    setIsImporting(true);
+    if (!beginOperation("import")) return;
     try {
       const text = await file.text().catch(() => {
         throw new Error("The file could not be read. Select the CSV file and try again.");
@@ -152,88 +165,80 @@ export default function Dashboard({
       const { added, duplicates, failed, errors } = result;
       const summary = `Added: ${added.length}. Duplicates skipped: ${duplicates}. Failed: ${failed}.`;
       const details = errors.length ? ` Database errors: ${errors.join("; ")}` : "";
-      const addedNames = new Set(added.map(({ name }) => name.trim().toLowerCase()));
-
-      setSavedParticipants((current) => [...current, ...added]);
-      setRoster((current) => {
-        // Replace temporary CSV entries when the same names are actually saved.
-        const replacedIds = new Set(current.participants
-          .filter(({ id, name }) => id.startsWith(temporaryIdPrefix) && addedNames.has(name.trim().toLowerCase()))
-          .map(({ id }) => id));
-
-        return {
-          ...current,
-          participants: [...current.participants.filter(({ id }) => !replacedIds.has(id)), ...added],
-          checkedInIds: [
-            ...current.checkedInIds.filter((id) => !replacedIds.has(id)),
-            ...added.filter(({ checked_in }) => checked_in).map(({ id }) => id),
-          ],
-          importMessage: summary + details,
-        };
-      });
+      setRoster((current) => ({
+        ...current,
+        participants: [...current.participants, ...added],
+        checkedInIds: [...current.checkedInIds, ...added.filter(({ checked_in }) => checked_in).map(({ id }) => id)],
+        importMessage: summary + details,
+      }));
     } catch (error) {
       setRoster((current) => ({
         ...current,
         importMessage: error instanceof Error ? error.message : "The CSV could not be imported.",
       }));
     } finally {
-      setIsImporting(false);
+      finishOperation();
     }
   }
 
   async function readSyncCsv(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
-    if (!file) return;
+    if (!file || !eventId || rosterLocked.current) return;
 
-    setSyncRows(null);
+    setSyncFile(null);
     setSyncMessage("");
     if (!file.name.toLowerCase().endsWith(".csv")) {
       setSyncMessage("Choose a .csv file to sync.");
       return;
     }
 
-    setIsReadingSync(true);
+    if (!beginOperation("preview")) return;
     try {
-      const text = await file.text().catch(() => {
-        throw new Error("The file could not be read. Select the CSV file and try again.");
-      });
-      if (!text.trim()) throw new Error("The CSV file is empty.");
-      const rows = parseParticipantCsv(text);
-      if (rows.length === 0) throw new Error("The CSV must contain at least one participant to sync.");
-      setSyncRows(rows);
-    } catch (error) {
-      setSyncMessage(error instanceof Error ? error.message : "The CSV could not be read for syncing.");
+      const text = await file.text();
+      const result = await prepareParticipantSync(eventId, text);
+      if (!result.preview) {
+        setSyncMessage(result.error ?? "We couldn't prepare the sync preview.");
+        return;
+      }
+      setSyncFile({ ...result, text });
+    } catch {
+      setSyncMessage("The CSV could not be read for syncing.");
     } finally {
-      setIsReadingSync(false);
+      finishOperation();
     }
   }
 
-  function confirmSync() {
-    if (!syncRows || isImporting || isSavingParticipant || pendingCheckIn) return;
+  async function confirmSync() {
+    if (!eventId || !syncFile?.confirmEnabled || !syncFile.receipt || !beginOperation("sync")) return;
 
-    setRoster((current) => {
-      const { added, removedIds } = previewParticipantSync(
-        current.participants, shifts, syncRows,
-      );
-      const participants = current.participants.filter(({ id }) => !removedIds.has(id));
-      const checkedInIds = current.checkedInIds.filter((id) => !removedIds.has(id));
-
-      added.forEach(({ name, checkedIn }, index) => {
-        const id = temporaryIdPrefix + (current.nextParticipantId + index);
-        participants.push({ id, name });
-        if (checkedIn) checkedInIds.push(id);
-      });
-
-      return {
+    let reloadRequired = false;
+    setSyncMessage("");
+    setSyncFile(null);
+    try {
+      const result = await confirmParticipantSync(eventId, syncFile.text, syncFile.receipt);
+      if (!result.saved) {
+        setSyncMessage(result.error ?? "We couldn't complete the sync.");
+        return;
+      }
+      if (!result.participants || !result.shifts) {
+        reloadRequired = true;
+        setSyncMessage("Sync was saved. Reload the Dashboard to see the updated roster and shifts.");
+        return;
+      }
+      const { participants: savedParticipants, shifts: savedShifts } = result;
+      setRoster((current) => ({
         ...current,
-        participants,
-        checkedInIds,
-        nextParticipantId: current.nextParticipantId + added.length,
-      };
-    });
-    setSyncRows(null);
-    setSyncMessage("Temporary CSV sync applied. Reloading restores the saved roster.");
+        participants: savedParticipants,
+        checkedInIds: savedParticipants.filter(({ checked_in }) => checked_in).map(({ id }) => id),
+      }));
+      setShifts(savedShifts);
+      setSyncMessage("Participant list synced successfully.");
+    } catch {
+      setSyncMessage("We couldn't confirm whether the sync was saved. Reload the Dashboard and check the saved roster and shifts before trying again.");
+    } finally {
+      finishOperation(reloadRequired);
+    }
   }
 
   async function exportParticipantsCsv() {
@@ -324,7 +329,7 @@ export default function Dashboard({
               <button
                 type="button"
                 onClick={() => csvInput.current?.click()}
-                disabled={!eventId || isImporting || isSavingParticipant}
+                disabled={!eventId || isRosterBusy}
                 className="min-h-10 rounded-lg border border-teal-800 px-3 text-sm font-medium text-teal-800 enabled:hover:bg-teal-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-60"
               >
                 {isImporting ? "Importing…" : "Import CSV"}
@@ -347,7 +352,7 @@ export default function Dashboard({
               <button
                 type="button"
                 onClick={() => syncInput.current?.click()}
-                disabled={isReadingSync}
+                disabled={!eventId || isRosterBusy}
                 className="min-h-10 rounded-lg border border-teal-800 px-3 text-sm font-medium text-teal-800 enabled:hover:bg-teal-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-60"
               >
                 {isReadingSync ? "Reading CSV…" : "Sync CSV"}
@@ -355,7 +360,7 @@ export default function Dashboard({
             </div>
           </div>
           <p className="px-4 pb-4 text-sm text-slate-600 sm:px-6">
-            Import and export use the saved event roster. Sync CSV only changes this page until you reload.
+            Sync CSV compares your file with the saved roster. Review the changes before confirming.
           </p>
           {participantLoadFailed && (
             <p role="alert" className="px-4 pb-4 text-sm text-red-700 sm:px-6">
@@ -377,12 +382,17 @@ export default function Dashboard({
           <p role="status" className={syncMessage ? "px-4 pb-4 text-sm text-slate-700 sm:px-6" : "sr-only"}>
             {syncMessage}
           </p>
-          {syncPreview && (
+          {syncFile && syncPreview && (
             <section aria-labelledby="sync-preview-heading" className="mx-4 mb-5 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:mx-6">
               <h3 id="sync-preview-heading" className="font-semibold">Sync Preview</h3>
-              <p className="mt-1 text-sm text-slate-600">
-                Unchanged participants: {syncPreview.unchangedCount}
-              </p>
+              <details className="mt-2 text-sm text-slate-600">
+                <summary className="cursor-pointer font-semibold">Unchanged Participants ({syncPreview.unchanged.length})</summary>
+                {syncPreview.unchanged.length ? (
+                  <ul className="mt-2 list-disc space-y-1 pl-5 [overflow-wrap:anywhere]">
+                    {syncPreview.unchanged.map(({ id, name }) => <li key={id}>{name}</li>)}
+                  </ul>
+                ) : <p className="mt-2">None</p>}
+              </details>
               <div className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
                 <div>
                   <h4 className="font-semibold">New Participants ({syncPreview.added.length})</h4>
@@ -403,7 +413,7 @@ export default function Dashboard({
               </div>
               {syncPreview.removedShifts.length > 0 && (
                 <div className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-950">
-                  <p className="font-semibold">These saved volunteer shifts will remain even if the CSV sync hides their participants from the roster ({syncPreview.removedShifts.length}).</p>
+                  <p className="font-semibold">Volunteer shifts to remove ({syncPreview.removedShifts.length}).</p>
                   <ul className="mt-2 list-disc space-y-1 pl-5 [overflow-wrap:anywhere]">
                     {syncPreview.removedShifts.map((shift) => (
                       <li key={shift.id}>
@@ -414,18 +424,25 @@ export default function Dashboard({
                   </ul>
                 </div>
               )}
+              <p role="status" className="mt-4 text-sm text-amber-950">
+                {!syncFile.confirmEnabled
+                  ? "Confirm Sync is disabled for this environment. You can preview or cancel."
+                  : !syncFile.receipt
+                    ? "Database sync signing is unavailable. You can preview or cancel."
+                    : "Review the changes above. Confirm Sync will permanently remove any listed participants and shifts."}
+              </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   type="button"
                   onClick={confirmSync}
-                  disabled={isImporting || isSavingParticipant || Boolean(pendingCheckIn)}
+                  disabled={!syncFile.confirmEnabled || !syncFile.receipt || isRosterBusy}
                   className="min-h-10 rounded-lg bg-teal-800 px-3 text-sm font-medium text-white enabled:hover:bg-teal-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-60"
                 >
                   Confirm Sync
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSyncRows(null)}
+                  onClick={() => setSyncFile(null)}
                   className="min-h-10 rounded-lg border border-slate-300 px-3 text-sm font-medium text-slate-700 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
                 >
                   Cancel
@@ -442,7 +459,7 @@ export default function Dashboard({
                 <input
                   id="participant-name"
                   type="text"
-                  disabled={!eventId || participantLoadFailed || isSavingParticipant}
+                  disabled={!eventId || participantLoadFailed || isRosterBusy}
                   value={participantName}
                   onChange={(event) => {
                     setParticipantName(event.target.value);
@@ -455,7 +472,7 @@ export default function Dashboard({
                 />
                 <button
                   type="submit"
-                  disabled={!eventId || participantLoadFailed || isSavingParticipant || isImporting}
+                  disabled={!eventId || participantLoadFailed || isRosterBusy}
                   className="min-h-10 rounded-lg bg-teal-800 px-3 text-sm font-medium text-white enabled:hover:bg-teal-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-60"
                 >
                   {isSavingParticipant ? "Saving…" : "Add Participant"}
@@ -507,9 +524,6 @@ export default function Dashboard({
                   <tr key={participant.id}>
                     <th scope="row" className="px-3 py-3 font-medium [overflow-wrap:anywhere] sm:px-6">
                       {participant.name}
-                      {participant.id.startsWith(temporaryIdPrefix) && (
-                        <span className="mt-1 block text-xs text-slate-600">Temporary</span>
-                      )}
                     </th>
                     <td className="px-2 py-3 sm:px-6">
                       <span className={isCheckedIn
@@ -523,7 +537,7 @@ export default function Dashboard({
                       <button
                         type="button"
                         aria-label={`Check in ${participant.name}`}
-                        disabled={isCheckedIn || Boolean(pendingCheckIn)}
+                        disabled={isCheckedIn || isRosterBusy}
                         onClick={() => checkIn(participant.id)}
                         className="min-h-10 whitespace-nowrap rounded-lg bg-teal-800 px-3 text-sm font-medium text-white enabled:hover:bg-teal-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:bg-slate-100 disabled:text-slate-500"
                       >
@@ -538,9 +552,12 @@ export default function Dashboard({
         </section>
         <VolunteerScheduling
           eventId={eventId}
-          participants={savedParticipants}
+          participants={participants}
           shifts={shifts}
           setShifts={setShifts}
+          isRosterBusy={isRosterBusy}
+          beginMutation={() => beginOperation("shift")}
+          finishMutation={finishOperation}
           shiftLoadFailed={shiftLoadFailed}
         />
       </main>

@@ -12,5 +12,5 @@ export async function getCurrentEvent(eventId: string) {
     return { error: "This event is no longer available. Refresh the page and try again." };
   }
 
-  return { supabase };
+  return { supabase, ownerId: data.claims.sub };
 }

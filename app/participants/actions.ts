@@ -1,5 +1,7 @@
 "use server";
 
+import { retryableWriteError } from "@/lib/supabase/write-conflict";
+
 import { getCurrentEvent } from "../events/current";
 import { participantColumns, readParticipants } from "./data";
 import { participantIdForName, participantNameKey } from "./write";
@@ -30,7 +32,7 @@ export async function saveParticipant(eventId: string, rawName: string) {
     .maybeSingle();
 
   if (result.error) {
-    return { error: result.error.code === "23505" ? duplicateError : "We couldn't save the participant. Try again." };
+    return { error: result.error.code === "23505" ? duplicateError : (retryableWriteError(result.error.code) ?? "We couldn't save the participant. Try again.") };
   }
 
   return result.data ? { participant: result.data } : { error: duplicateError };
@@ -50,7 +52,7 @@ export async function saveCheckIn(eventId: string, participantId: string) {
     .maybeSingle();
 
   const checkInError = "We couldn't check in this participant. Refresh the page and try again.";
-  if (result.error) return { error: checkInError };
+  if (result.error) return { error: retryableWriteError(result.error.code) ?? checkInError };
   if (result.data) return { ok: true };
 
   // Another tab may already have checked in this participant.

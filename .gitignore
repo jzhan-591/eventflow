@@ -22,7 +22,24 @@
 
 # misc
 .DS_Store
+
+# local secrets and database credentials
 *.pem
+*.key
+*.p12
+*.pfx
+.netrc
+.pgpass
+pgpass.conf
+.envrc
+.npmrc.local
+credentials.json
+credentials.local.json
+database-password.txt
+eventflow-sync-key
+secrets.local.*
+/supabase/.temp/
+/supabase/.branches/
 
 # debug
 npm-debug.log*

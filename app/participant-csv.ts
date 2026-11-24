@@ -3,13 +3,41 @@ export type ImportedParticipant = {
   checkedIn: boolean;
 };
 
+const encodedNamePrefix = "EventFlow text: ";
+const encodingMarker = ["EventFlow Spreadsheet Encoding v1", "Metadata"] as const;
+
+function needsSpreadsheetEncoding(name: string) {
+  return name !== name.trim() ||
+    name.startsWith(encodedNamePrefix) ||
+    /^[\s']*[=+\-@＝＋－＠]/u.test(name) ||
+    /[\p{Cc}\p{Cf}]/u.test(name);
+}
+
+function decodeParticipantName(field: string, record: number) {
+  const payload = field.slice(encodedNamePrefix.length);
+  const name = Buffer.from(payload, "base64url").toString("utf8");
+  if (!payload || Buffer.from(name, "utf8").toString("base64url") !== payload ||
+      !needsSpreadsheetEncoding(name)) {
+    throw new Error(`Participant record ${record} has an invalid EventFlow-encoded name.`);
+  }
+  return name;
+}
+
 export function serializeParticipantCsv(participants: { name: string; checked_in: boolean }[]) {
+  const header = ["Name,Status"];
+  if (participants.some(({ name }) => needsSpreadsheetEncoding(name))) {
+    header.push(encodingMarker.join(","));
+  }
+
   const rows = participants.map(({ name, checked_in }) => {
+    const spreadsheetName = needsSpreadsheetEncoding(name)
+      ? encodedNamePrefix + Buffer.from(name, "utf8").toString("base64url")
+      : name;
     // Quoted fields preserve commas, quotes, and line breaks.
-    const csvName = `"${name.replace(/"/g, '""')}"`;
+    const csvName = `"${spreadsheetName.replace(/"/g, '""')}"`;
     return `${csvName},${checked_in ? "Checked In" : "Not Checked In"}`;
   });
-  return ["Name,Status", ...rows].join("\r\n") + "\r\n";
+  return [...header, ...rows].join("\r\n") + "\r\n";
 }
 
 function readCsvRows(text: string) {
@@ -76,15 +104,24 @@ export function parseParticipantCsv(text: string): ImportedParticipant[] {
     throw new Error("The CSV must have two columns with the headers Name and Status.");
   }
 
+  // The marker cannot be mistaken for a valid legacy participant row.
+  const marker = rows[0];
+  const spreadsheetEncoded = marker?.length === 2 &&
+    marker[nameColumn] === encodingMarker[0] && marker[statusColumn] === encodingMarker[1];
+  if (spreadsheetEncoded) rows.shift();
+
   return rows.map((row, index) => {
     const record = index + 1;
     if (row.length !== 2) {
       throw new Error(`Participant record ${record} must have exactly two fields: Name and Status.`);
     }
 
-    const name = row[nameColumn].trim();
+    const field = row[nameColumn];
+    const name = spreadsheetEncoded && field.startsWith(encodedNamePrefix)
+      ? decodeParticipantName(field, record)
+      : field.trim();
     const status = row[statusColumn].trim();
-    if (!name) {
+    if (!name.trim()) {
       throw new Error(`Participant record ${record} is missing a name.`);
     }
     if (status !== "Checked In" && status !== "Not Checked In") {

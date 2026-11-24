@@ -26,6 +26,7 @@ export function toShift(row: ShiftRow, volunteerName: string): Shift {
 
 export async function readShifts(supabase: Awaited<ReturnType<typeof createClient>>, eventId: string) {
   const shifts: Shift[] = [];
+  const versions: Record<string, [string, string, string, string]> = {};
   const pageSize = 200;
 
   while (true) {
@@ -41,10 +42,11 @@ export async function readShifts(supabase: Awaited<ReturnType<typeof createClien
       .overrideTypes<ShiftWithVolunteer[], { merge: false }>();
 
     if (error) return { shifts: [], error };
-    if (data.length === 0) return { shifts, error: null };
+    if (data.length === 0) return { shifts, versions, error: null };
 
     for (const row of data) {
       shifts.push(toShift(row, row.participants.full_name));
+      versions[row.id] = [row.participant_id, row.role, row.start_time, row.end_time];
     }
   }
 }

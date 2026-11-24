@@ -10,20 +10,25 @@ export default function VolunteerScheduling({
   participants,
   shifts,
   setShifts,
+  isRosterBusy,
+  beginMutation,
+  finishMutation,
   shiftLoadFailed,
 }: {
   eventId: string | null;
   participants: Participant[];
   shifts: Shift[];
   setShifts: Dispatch<SetStateAction<Shift[]>>;
+  isRosterBusy: boolean;
+  beginMutation: () => boolean;
+  finishMutation: () => void;
   shiftLoadFailed: boolean;
 }) {
   const [error, setError] = useState("");
-  const [pending, setPending] = useState(false);
 
   async function addShift(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!eventId || pending || shiftLoadFailed) return;
+    if (!eventId || isRosterBusy || shiftLoadFailed) return;
 
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
@@ -54,7 +59,7 @@ export default function VolunteerScheduling({
       return;
     }
 
-    setPending(true);
+    if (!beginMutation()) return;
     setError("");
     try {
       const result = await saveShift(eventId, volunteerId, role, startTime, endTime);
@@ -69,14 +74,13 @@ export default function VolunteerScheduling({
     } catch {
       setError("We couldn't save the shift. Try again.");
     } finally {
-      setPending(false);
+      finishMutation();
     }
   }
 
   async function deleteShift(id: string) {
-    if (!eventId || pending) return;
+    if (!eventId || isRosterBusy || !beginMutation()) return;
 
-    setPending(true);
     setError("");
     try {
       const result = await removeShift(eventId, id);
@@ -88,7 +92,7 @@ export default function VolunteerScheduling({
     } catch {
       setError("We couldn't delete the shift. Try again.");
     } finally {
-      setPending(false);
+      finishMutation();
     }
   }
 
@@ -137,7 +141,7 @@ export default function VolunteerScheduling({
 
           <button
             type="submit"
-            disabled={!eventId || participants.length === 0 || pending || shiftLoadFailed}
+            disabled={!eventId || participants.length === 0 || isRosterBusy || shiftLoadFailed}
             className="mt-4 min-h-10 rounded-lg bg-teal-800 px-3 text-sm font-medium text-white enabled:hover:bg-teal-900 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
           >
             Add Shift
@@ -173,7 +177,7 @@ export default function VolunteerScheduling({
                     type="button"
                     aria-label={`Delete ${shift.volunteerName}'s ${shift.startTime} shift`}
                     onClick={() => deleteShift(shift.id)}
-                    disabled={pending}
+                    disabled={isRosterBusy}
                     className="min-h-10 rounded-lg border border-slate-300 px-3 font-medium text-slate-700 enabled:hover:bg-slate-100 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700"
                   >
                     Delete

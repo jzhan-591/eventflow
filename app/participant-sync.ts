@@ -21,6 +21,7 @@ export function previewParticipantSync(
   const removed = participants.filter(({ name }) => !csvByName.has(name.trim().toLowerCase()));
   const removedIds = new Set(removed.map(({ id }) => id));
   const removedShifts = shifts.filter(({ volunteerId }) => removedIds.has(volunteerId));
+  const unchanged = participants.filter(({ id }) => !removedIds.has(id));
 
-  return { added, removed, removedIds, removedShifts, unchangedCount: participants.length - removed.length };
+  return { added, removed, removedShifts, unchanged };
 }

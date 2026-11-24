@@ -1,5 +1,7 @@
 "use server";
 
+import { retryableWriteError } from "@/lib/supabase/write-conflict";
+
 import { getCurrentEvent } from "../events/current";
 import { roles, validateShiftTimes } from "./model";
 import { shiftColumns, toShift } from "./data";
@@ -42,7 +44,7 @@ export async function saveShift(
   if (result.error?.code === "23514" || result.error?.code === "22P02") {
     return { error: "The database rejected this role or shift time. Check the event's scheduling settings." };
   }
-  if (result.error) return { error: "We couldn't save the shift. Try again." };
+  if (result.error) return { error: retryableWriteError(result.error.code) ?? "We couldn't save the shift. Try again." };
 
   return { shift: toShift(result.data, volunteer.data.full_name) };
 }
@@ -61,7 +63,8 @@ export async function removeShift(eventId: string, shiftId: string) {
   const result = await table.delete().eq("id", shiftId)
     .eq("participant_id", existing.data.participant_id).select("id").maybeSingle();
 
-  if (result.error || !result.data) return { error: deleteError };
+  if (result.error) return { error: retryableWriteError(result.error.code) ?? deleteError };
+  if (!result.data) return { error: deleteError };
 
   return { ok: true };
 }
