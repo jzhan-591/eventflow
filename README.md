@@ -14,6 +14,26 @@ EventFlow helps event organizers manage a roster, track attendance, and schedule
 - **CSV Confirm Sync** — Apply an explicitly confirmed preview in a database transaction. Participants retained by the sync keep their IDs, check-in states, and shifts.
 - **Volunteer Scheduling** — Assign and delete shifts. Overlapping shifts for the same volunteer are rejected.
 
+## Screenshots
+
+### Dashboard Overview
+
+View event details, the participant roster, and real-time check-in progress.
+
+![EventFlow dashboard showing event details, the participant roster, and check-in progress](./public/screenshots/dashboard-overview.png)
+
+### CSV Sync Preview
+
+Compare a CSV with the saved roster and review participants and volunteer shifts marked for removal. This test-environment screenshot shows Confirm Sync disabled by the environment setting.
+
+![CSV sync preview showing roster changes, a participant marked for removal, and the affected volunteer shift](./public/screenshots/csv-sync-preview.png)
+
+### Volunteer Scheduling
+
+Choose a volunteer and role, set shift times, and review existing assignments.
+
+![Volunteer scheduling form with role and time fields above the saved shifts](./public/screenshots/volunteer-scheduling.png)
+
 ## Tech Stack and Data
 
 EventFlow uses Next.js, React, TypeScript, and Tailwind CSS. Supabase Auth manages sessions, and Supabase PostgreSQL persists events, participants, check-ins, and shifts. Row-level security (RLS) scopes database access to the signed-in organizer. Saved changes are loaded again on refresh.
